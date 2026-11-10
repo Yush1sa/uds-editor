@@ -1,0 +1,1723 @@
+import { geoMercator as d3_geoMercator } from 'd3-geo';
+
+describe('iD.osmIntersection', function() {
+    var maxDist = Infinity;
+
+    describe('highways', function() {
+        // u ==== * ---> w
+        it('excludes non-highways', function() {
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'u', loc: [0, 0] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'w', loc: [2, 0] }),
+                new iD.osmWay({ id: '=', nodes: ['u', '*'] }),
+                new iD.osmWay({ id: '-', nodes: ['*', 'w'] })
+            ]);
+            expect(iD.osmIntersection(graph, '*', maxDist).ways).toEqual([]);
+        });
+
+        it('excludes degenerate highways', function() {
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'u', loc: [0, 0] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmWay({ id: '=', nodes: ['u', '*'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '-', nodes: ['*'], tags: { highway: 'residential' } })
+            ]);
+            var result = iD.osmIntersection(graph, '*', maxDist).ways;
+            expect(result.map(function(i) { return i.id; })).toEqual(['=']);
+        });
+
+        it('includes line highways', function() {
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'u', loc: [0, 0] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'w', loc: [2, 0] }),
+                new iD.osmWay({ id: '=', nodes: ['u', '*'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '-', nodes: ['*', 'w'] })
+            ]);
+            var result = iD.osmIntersection(graph, '*', maxDist).ways;
+            expect(result.map(function(i) { return i.id; })).toEqual(['=']);
+        });
+
+        it('excludes area highways', function() {
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'u', loc: [0, 0] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'w', loc: [2, 0] }),
+                new iD.osmWay({id: '=', nodes: ['u', '*', 'w'], tags: { highway: 'pedestrian', area: 'yes' } })
+            ]);
+            expect(iD.osmIntersection(graph, '*', maxDist).ways).toEqual([]);
+        });
+
+        it('auto-splits highways at the intersection', function() {
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'u', loc: [0, 0] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'w', loc: [2, 0] }),
+                new iD.osmWay({ id: '=', nodes: ['u', '*', 'w'], tags: { highway: 'residential' } })
+            ]);
+            expect(iD.osmIntersection(graph, '*', maxDist).ways.length).toEqual(2);
+        });
+    });
+
+    describe('#turns', function() {
+        it('permits turns onto a way forward', function() {
+            // u ==== * ---> w
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'u', loc: [0, 0] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'w', loc: [2, 0] }),
+                new iD.osmWay({ id: '=', nodes: ['u', '*'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '-', nodes: ['*', 'w'], tags: { highway: 'residential' } })
+            ]);
+
+            var turns = iD.osmIntersection(graph, '*', maxDist).turns('=');
+            expect(turns.length).toEqual(2);
+
+            expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[0].key).toEqual('=_*_=');
+            expect(turns[0].u).toBe(true);
+
+            expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[1].key).toEqual('=_*_-');
+            expect(turns[1].u).toBeFalsy();
+        });
+
+        it('permits turns onto a way backward', function() {
+            // u ==== * <--- w
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'u', loc: [0, 0] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'w', loc: [2, 0] }),
+                new iD.osmWay({ id: '=', nodes: ['u', '*'], tags: {highway: 'residential' } }),
+                new iD.osmWay({ id: '-', nodes: ['w', '*'], tags: {highway: 'residential' } })
+            ]);
+
+            var turns = iD.osmIntersection(graph, '*', maxDist).turns('=');
+            expect(turns.length).toEqual(2);
+
+            expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[0].key).toEqual('=_*_=');
+            expect(turns[0].u).toBe(true);
+
+            expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[1].key).toEqual('=_*_-');
+            expect(turns[1].u).toBeFalsy();
+        });
+
+        it('permits turns from a way that must be split', function() {
+            //       w
+            //       |
+            // u === *
+            //       |
+            //       x
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'u', loc: [0, 0] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'w', loc: [1, 1] }),
+                new iD.osmNode({ id: 'x', loc: [1, -1] }),
+                new iD.osmWay({ id: '=', nodes: ['u', '*'], tags: {highway: 'residential' } }),
+                new iD.osmWay({ id: '-', nodes: ['w', '*', 'x'], tags: {highway: 'residential' } })
+            ]);
+
+            var turns = iD.osmIntersection(graph, '*', maxDist).turns('-');
+            expect(turns.length).toEqual(3);
+
+            expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[0].key).toEqual('-_*_=');
+            expect(turns[0].u).toBeFalsy();
+
+            expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[1].key).toEqual('-_*_-');
+            expect(turns[1].u).toBe(true);
+
+            expect(turns[2]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[2].key).to.match(/^-\_\*\_w-\d+$/);   // new way
+            expect(turns[2].u).toBeFalsy();
+        });
+
+        it('permits turns to a way that must be split', function() {
+            //       w
+            //       |
+            // u === *
+            //       |
+            //       x
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'u', loc: [0, 0] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'w', loc: [1, 1] }),
+                new iD.osmNode({ id: 'x', loc: [1, -1] }),
+                new iD.osmWay({ id: '=', nodes: ['u', '*'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '-', nodes: ['w', '*', 'x'], tags: { highway: 'residential' } })
+            ]);
+
+            var turns = iD.osmIntersection(graph, '*', maxDist).turns('=');
+            expect(turns.length).toEqual(3);
+
+            expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[0].key).toEqual('=_*_=');
+            expect(turns[0].u).toBe(true);
+
+            expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[1].key).toEqual('=_*_-');
+            expect(turns[1].u).toBeFalsy();
+
+            expect(turns[2]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[2].key).to.match(/^=\_\*\_w-\d+$/);   // new way
+            expect(turns[2].u).toBeFalsy();
+        });
+
+        it('permits turns from a oneway forward', function() {
+            // u ===> * ----w
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'u', loc: [0, 0] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'w', loc: [2, 0] }),
+                new iD.osmWay({ id: '=', nodes: ['u', '*'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '-', nodes: ['*', 'w'], tags: { highway: 'residential' } })
+            ]);
+
+            var turns = iD.osmIntersection(graph, '*', maxDist).turns('=');
+            expect(turns.length).toEqual(1);
+
+            expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[0].key).toEqual('=_*_-');
+            expect(turns[0].u).toBeFalsy();
+        });
+
+        it('permits turns from a reverse oneway backward', function() {
+            // u <=== * ---- w
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'u', loc: [0, 0] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'w', loc: [2, 0] }),
+                new iD.osmWay({ id: '=', nodes: ['*', 'u'], tags: { highway: 'residential', oneway: '-1' } }),
+                new iD.osmWay({ id: '-', nodes: ['*', 'w'], tags: { highway: 'residential' } })
+            ]);
+
+            var turns = iD.osmIntersection(graph, '*', maxDist).turns('=');
+            expect(turns.length).toEqual(1);
+
+            expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[0].key).toEqual('=_*_-');
+            expect(turns[0].u).toBeFalsy();
+        });
+
+        it('omits turns from a oneway backward', function() {
+            // u <=== * ---- w
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'u', loc: [0, 0] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'w', loc: [2, 0] }),
+                new iD.osmWay({ id: '=', nodes: ['*', 'u'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '-', nodes: ['*', 'w'], tags: { highway: 'residential' } })
+            ]);
+            expect(iD.osmIntersection(graph, '*', maxDist).turns('u')).toEqual([]);
+        });
+
+        it('omits turns from a reverse oneway forward', function() {
+            // u ===> * ---- w
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'u', loc: [0, 0] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'w', loc: [2, 0] }),
+                new iD.osmWay({ id: '=', nodes: ['u', '*'], tags: { highway: 'residential', oneway: '-1' } }),
+                new iD.osmWay({ id: '-', nodes: ['*', 'w'], tags: { highway: 'residential' } })
+            ]);
+            expect(iD.osmIntersection(graph, '*', maxDist).turns('u')).toEqual([]);
+        });
+
+        it('permits turns onto a oneway forward', function() {
+            // u ==== * ---> w
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'u', loc: [0, 0] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'w', loc: [2, 0] }),
+                new iD.osmWay({ id: '=', nodes: ['u', '*'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '-', nodes: ['*', 'w'], tags: { highway: 'residential', oneway: 'yes' } })
+            ]);
+
+            var turns = iD.osmIntersection(graph, '*', maxDist).turns('=');
+            expect(turns.length).toEqual(2);
+
+            expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[0].key).toEqual('=_*_=');
+            expect(turns[0].u).toBe(true);
+
+            expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[1].key).toEqual('=_*_-');
+            expect(turns[1].u).toBeFalsy();
+        });
+
+        it('permits turns onto a reverse oneway backward', function() {
+            // u ==== * <--- w
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'u', loc: [0, 0] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'w', loc: [2, 0] }),
+                new iD.osmWay({ id: '=', nodes: ['u', '*'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '-', nodes: ['w', '*'], tags: { highway: 'residential', oneway: '-1' } })
+            ]);
+
+            var turns = iD.osmIntersection(graph, '*', maxDist).turns('=');
+            expect(turns.length).toEqual(2);
+
+            expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[0].key).toEqual('=_*_=');
+            expect(turns[0].u).toBe(true);
+
+            expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[1].key).toEqual('=_*_-');
+            expect(turns[1].u).toBeFalsy();
+        });
+
+        it('omits turns onto a oneway backward', function() {
+            // u ==== * <--- w
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'u', loc: [0, 0] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'w', loc: [2, 0] }),
+                new iD.osmWay({ id: '=', nodes: ['u', '*'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '-', nodes: ['w', '*'], tags: { highway: 'residential', oneway: 'yes' } })
+            ]);
+
+            var turns = iD.osmIntersection(graph, '*', maxDist).turns('=');
+            expect(turns.length).toEqual(1);
+
+            expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[0].key).toEqual('=_*_=');
+            expect(turns[0].u).toBe(true);
+        });
+
+        it('omits turns onto a reverse oneway forward', function() {
+            // u ==== * ---> w
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'u', loc: [0, 0] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'w', loc: [2, 0] }),
+                new iD.osmWay({ id: '=', nodes: ['u', '*'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '-', nodes: ['*', 'w'], tags: { highway: 'residential', oneway: '-1' } })
+            ]);
+
+            var turns = iD.osmIntersection(graph, '*', maxDist).turns('=');
+            expect(turns.length).toEqual(1);
+
+            expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[0].key).toEqual('=_*_=');
+            expect(turns[0].u).toBe(true);
+        });
+
+        it('restricts turns with a no_* restriction relation', function() {
+            // u ==== * ---> w
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'u', loc: [0, 0] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'w', loc: [2, 0] }),
+                new iD.osmWay({ id: '=', nodes: ['u', '*'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '-', nodes: ['*', 'w'], tags: { highway: 'residential' } }),
+                new iD.osmRelation({id: 'r', tags: { type: 'restriction', restriction: 'no_straight_on' }, members: [
+                    { id: '=', role: 'from', type: 'way' },
+                    { id: '-', role: 'to', type: 'way' },
+                    { id: '*', role: 'via', type: 'node' }
+                ]})
+            ]);
+            var turns = iD.osmIntersection(graph, '*', maxDist).turns('=');
+
+            expect(turns.length).toEqual(2);
+
+            expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[0].key).toEqual('=_*_=');
+            expect(turns[0].u).toBe(true);
+
+            expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[1].key).toEqual('=_*_-');
+            expect(turns[1].u).toBeFalsy();
+            expect(turns[1].restrictionID).toEqual('r');
+            expect(turns[1].direct).toBe(true);
+            expect(turns[1].only).toBeFalsy();
+        });
+
+        it('restricts turns affected by an only_* restriction relation', function() {
+            // u====*~~~~v
+            //      |
+            //      w
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'u', loc: [0, 0] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'v', loc: [2, 0] }),
+                new iD.osmNode({ id: 'w', loc: [1, -1] }),
+                new iD.osmWay({ id: '=', nodes: ['u', '*'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '~', nodes: ['v', '*'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '-', nodes: ['w', '*'], tags: { highway: 'residential' } }),
+                new iD.osmRelation({ id: 'r', tags: { type: 'restriction', restriction: 'only_right_turn' }, members: [
+                    { id: '=', role: 'from', type: 'way' },
+                    { id: '-', role: 'to', type: 'way' },
+                    { id: '*', role: 'via', type: 'node' }
+                ]})
+            ]);
+
+            var turns = iD.osmIntersection(graph, '*', maxDist).turns('=');
+            expect(turns.length).toEqual(3);
+
+            expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[0].key).toEqual('=_*_=');
+            expect(turns[0].u).toBe(true);
+            expect(turns[1].direct).toBe(false);
+            expect(turns[1].only).toBeFalsy();
+
+            expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[1].key).toEqual('=_*_~');
+            expect(turns[1].restrictionID).toEqual('r');
+            expect(turns[1].u).toBeFalsy();
+            expect(turns[1].direct).toBe(false);
+            expect(turns[1].only).toBeFalsy();
+
+            expect(turns[2]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[2].key).toEqual('=_*_-');
+            expect(turns[2].restrictionID).toEqual('r');
+            expect(turns[2].u).toBeFalsy();
+            expect(turns[2].direct).toBe(true);
+            expect(turns[2].only).toBe(true);
+        });
+
+        it('permits turns to a circular way', function() {
+            //
+            //  b -- c
+            //  |    |
+            //  a -- * === u
+            //
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'a', loc: [0, 0] }),
+                new iD.osmNode({ id: 'b', loc: [0, 1] }),
+                new iD.osmNode({ id: 'c', loc: [1, 1] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'u', loc: [2, 0] }),
+                new iD.osmWay({ id: '-', nodes: ['*', 'a', 'b', 'c', '*'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '=', nodes: ['*', 'u'], tags: { highway: 'residential' } })
+            ]);
+
+            var turns = iD.osmIntersection(graph, '*', maxDist).turns('=');
+            expect(turns.length).toEqual(3);
+
+            expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[0].key).toEqual('=_*_-');
+            expect(turns[0].u).toBeFalsy();
+
+            expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[1].key).toEqual('=_*_=');
+            expect(turns[1].u).toBe(true);
+
+            expect(turns[2]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[2].key).to.match(/^=\_\*\_w-\d+$/);   // new way
+            expect(turns[2].u).toBeFalsy();
+        });
+
+        it('permits turns from a circular way', function() {
+            //
+            //  b -- c
+            //  |    |
+            //  a -- * === u
+            //
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'a', loc: [0, 0] }),
+                new iD.osmNode({ id: 'b', loc: [0, 1] }),
+                new iD.osmNode({ id: 'c', loc: [1, 1] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'u', loc: [2, 0] }),
+                new iD.osmWay({ id: '-', nodes: ['*', 'a', 'b', 'c', '*'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '=', nodes: ['*', 'u'], tags: { highway: 'residential' } })
+            ]);
+
+            var turns = iD.osmIntersection(graph, '*', maxDist).turns('-');
+            expect(turns.length).toEqual(3);
+
+            expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[0].key).toEqual('-_*_-');
+            expect(turns[0].u).toBe(true);
+
+            expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[1].key).toEqual('-_*_=');
+            expect(turns[1].u).toBeFalsy();
+
+            expect(turns[2]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[2].key).to.match(/^-\_\*\_w-\d+$/);   // new way
+            expect(turns[2].u).toBeFalsy();
+        });
+
+        it('permits turns to a oneway circular way', function() {
+            //
+            //  b -- c
+            //  |    |
+            //  a -- * === u
+            //
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'a', loc: [0, 0] }),
+                new iD.osmNode({ id: 'b', loc: [0, 1] }),
+                new iD.osmNode({ id: 'c', loc: [1, 1] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'u', loc: [2, 0] }),
+                new iD.osmWay({ id: '-', nodes: ['*', 'a', 'b', 'c', '*'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '=', nodes: ['*', 'u'], tags: { highway: 'residential' } })
+            ]);
+
+            var turns = iD.osmIntersection(graph, '*', maxDist).turns('=');
+            expect(turns.length).toEqual(2);
+
+            expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[0].key).toEqual('=_*_-');
+            expect(turns[0].u).toBeFalsy();
+
+            expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[1].key).toEqual('=_*_=');
+            expect(turns[1].u).toBe(true);
+        });
+
+        it('permits turns to a reverse oneway circular way', function() {
+            //
+            //  b -- c
+            //  |    |
+            //  a -- * === u
+            //
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'a', loc: [0, 0] }),
+                new iD.osmNode({ id: 'b', loc: [0, 1] }),
+                new iD.osmNode({ id: 'c', loc: [1, 1] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'u', loc: [2, 0] }),
+                new iD.osmWay({ id: '-', nodes: ['*', 'a', 'b', 'c', '*'], tags: { highway: 'residential', oneway: '-1' } }),
+                new iD.osmWay({ id: '=', nodes: ['*', 'u'], tags: { highway: 'residential' } })
+            ]);
+
+            var turns = iD.osmIntersection(graph, '*', maxDist).turns('=');
+            expect(turns.length).toEqual(2);
+
+            expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[0].key).toEqual('=_*_-');
+            expect(turns[0].u).toBeFalsy();
+
+            expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[1].key).toEqual('=_*_=');
+            expect(turns[1].u).toBe(true);
+        });
+
+        it('permits turns from a oneway circular way', function() {
+            //
+            //  b -- c
+            //  |    |
+            //  a -- * === u
+            //
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'a', loc: [0, 0] }),
+                new iD.osmNode({ id: 'b', loc: [0, 1] }),
+                new iD.osmNode({ id: 'c', loc: [1, 1] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'u', loc: [2, 0] }),
+                new iD.osmWay({ id: '-', nodes: ['*', 'a', 'b', 'c', '*'], tags: {highway: 'residential', oneway: 'yes'}}),
+                new iD.osmWay({ id: '=', nodes: ['*', 'u'], tags: {highway: 'residential'}})
+            ]);
+
+            var intersection = iD.osmIntersection(graph, '*', maxDist);
+            var newWay = intersection.ways.find(function(w) { return /^w-\d+$/.test(w.id); });
+            var turns = iD.osmIntersection(graph, '*', maxDist).turns(newWay.id);
+            expect(turns.length).toEqual(2);
+
+            expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[0].key).toEqual(newWay.id + '_*_-');
+            expect(turns[0].u).toBeFalsy();
+
+            expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[1].key).toEqual(newWay.id + '_*_=');
+            expect(turns[1].u).toBeFalsy();
+        });
+
+        it('permits turns from a reverse oneway circular way', function() {
+            //
+            //  b -- c
+            //  |    |
+            //  a -- * === u
+            //
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'a', loc: [0, 0] }),
+                new iD.osmNode({ id: 'b', loc: [0, 1] }),
+                new iD.osmNode({ id: 'c', loc: [1, 1] }),
+                new iD.osmNode({ id: '*', loc: [1, 0] }),
+                new iD.osmNode({ id: 'u', loc: [2, 0] }),
+                new iD.osmWay({id: '-', nodes: ['*', 'a', 'b', 'c', '*'], tags: { highway: 'residential', oneway: '-1' } }),
+                new iD.osmWay({id: '=', nodes: ['*', 'u'], tags: { highway: 'residential' } })
+            ]);
+
+            var intersection = iD.osmIntersection(graph, '*', maxDist);
+            var newWay = intersection.ways.find(function(w) { return /^w-\d+$/.test(w.id); });
+            var turns = iD.osmIntersection(graph, '*', maxDist).turns(newWay.id);
+            expect(turns.length).toEqual(2);
+
+            expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[0].key).toEqual(newWay.id + '_*_-');
+            expect(turns[0].u).toBeFalsy();
+
+            expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+            expect(turns[1].key).toEqual(newWay.id + '_*_=');
+            expect(turns[1].u).toBeFalsy();
+        });
+
+
+        describe('complex intersection - without restrictions', function() {
+            //
+            //           g
+            //          /
+            //  a <--- b <=== c
+            //         |
+            //         |
+            //  d ~~~> e ≈≈≈> f
+            //          \
+            //           h
+            //
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'a', loc: [0, 1] }),
+                new iD.osmNode({ id: 'b', loc: [1, 1] }),
+                new iD.osmNode({ id: 'c', loc: [2, 1] }),
+                new iD.osmNode({ id: 'd', loc: [0,-1] }),
+                new iD.osmNode({ id: 'e', loc: [1,-1] }),
+                new iD.osmNode({ id: 'f', loc: [2,-1] }),
+                new iD.osmNode({ id: 'g', loc: [2, 2] }),
+                new iD.osmNode({ id: 'h', loc: [2,-2] }),
+                new iD.osmWay({ id: '-', nodes: ['b', 'a'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '=', nodes: ['c', 'b'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '~', nodes: ['d', 'e'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '≈', nodes: ['e', 'f'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '|', nodes: ['b', 'e'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '/', nodes: ['b', 'g'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '\\', nodes: ['e', 'h'], tags: { highway: 'residential' } })
+            ]);
+
+            it('no turns from a destination way', function() {
+                var turns;
+                turns = iD.osmIntersection(graph, 'b', maxDist).turns('-', 1);
+                expect(turns.length).toEqual(0);
+                turns = iD.osmIntersection(graph, 'b', maxDist).turns('≈', 1);
+                expect(turns.length).toEqual(0);
+            });
+
+            it('allows via node and via way turns from a oneway', function() {
+                var turns;
+                turns = iD.osmIntersection(graph, 'b', maxDist).turns('=', 1);
+                expect(turns.length).toEqual(5);
+
+                expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[0].key).toEqual('=_b_-');  // straight to -
+                expect(turns[0].u).toBeFalsy();
+
+                expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[1].key).toEqual('=_b_|');  // left to |
+                expect(turns[1].u).toBeFalsy();
+
+                expect(turns[2]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[2].key).toEqual('=_b_|_e_≈');  // u-turn via | to ≈
+                expect(turns[2].u).toBeFalsy();
+
+                expect(turns[3]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[3].key).toEqual('=_b_|_e_\\');  // left via | to \
+                expect(turns[3].u).toBeFalsy();
+
+                expect(turns[4]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[4].key).toEqual('=_b_/');  // right to /
+                expect(turns[4].u).toBeFalsy();
+            });
+
+            it('allows via node and via way turns from a bidirectional', function() {
+                var turns;
+                turns = iD.osmIntersection(graph, 'b', maxDist).turns('/', 1);
+                expect(turns.length).toEqual(5);
+
+                expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[0].key).toEqual('/_b_-');  // right to -
+                expect(turns[0].u).toBeFalsy();
+
+                expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[1].key).toEqual('/_b_|');  // straight to |
+                expect(turns[1].u).toBeFalsy();
+
+                expect(turns[2]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[2].key).toEqual('/_b_|_e_≈');  // left via | to ≈
+                expect(turns[2].u).toBeFalsy();
+
+                expect(turns[3]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[3].key).toEqual('/_b_|_e_\\');  // straight via | to \
+                expect(turns[3].u).toBeFalsy();
+
+                expect(turns[4]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[4].key).toEqual('/_b_/');  // u-turn
+                expect(turns[4].u).toBeTruthy();
+            });
+        });
+
+
+        describe('complex intersection - restricted turn via node', function() {
+            //
+            //           g
+            //          /
+            //  a <--- b <=== c
+            //         |
+            //         |           'r': `no_right_turn` FROM '|' VIA NODE 'e' TO '≈'
+            //  d ~~~> e ≈≈≈> f
+            //          \
+            //           h
+            //
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'a', loc: [0, 1] }),
+                new iD.osmNode({ id: 'b', loc: [1, 1] }),
+                new iD.osmNode({ id: 'c', loc: [2, 1] }),
+                new iD.osmNode({ id: 'd', loc: [0,-1] }),
+                new iD.osmNode({ id: 'e', loc: [1,-1] }),
+                new iD.osmNode({ id: 'f', loc: [2,-1] }),
+                new iD.osmNode({ id: 'g', loc: [2, 2] }),
+                new iD.osmNode({ id: 'h', loc: [2,-2] }),
+                new iD.osmWay({ id: '-', nodes: ['b', 'a'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '=', nodes: ['c', 'b'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '~', nodes: ['d', 'e'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '≈', nodes: ['e', 'f'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '|', nodes: ['b', 'e'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '/', nodes: ['b', 'g'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '\\', nodes: ['e', 'h'], tags: { highway: 'residential' } }),
+                new iD.osmRelation({
+                    id: 'r',
+                    tags: { type: 'restriction', restriction: 'no_right_turn' },
+                    members: [
+                        { role: 'from', id: '|', type: 'way' },
+                        { role: 'via', id: 'e', type: 'node' },
+                        { role: 'to', id: '≈', type: 'way' }
+                    ]
+                })
+            ]);
+
+            it('allows via node and via way turns from a oneway', function() {
+                var turns;
+                turns = iD.osmIntersection(graph, 'b', maxDist).turns('=', 1);
+                expect(turns.length).toEqual(5);
+
+                expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[0].key).toEqual('=_b_-');  // straight to -
+                expect(turns[0].u).toBeFalsy();
+
+                expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[1].key).toEqual('=_b_|');  // left to |
+                expect(turns[1].u).toBeFalsy();
+
+                expect(turns[2]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[2].key).toEqual('|_e_≈');  // right turn from | to ≈
+                expect(turns[2].u).toBeFalsy();
+                expect(turns[2].restrictionID).toEqual('r');
+                expect(turns[2].direct).toBe(false);        // indirect
+                expect(turns[2].no).toBe(true);             // restricted!
+                expect(turns[2].only).toBeFalsy();
+
+                expect(turns[3]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[3].key).toEqual('=_b_|_e_\\');  // left via | to \
+                expect(turns[3].u).toBeFalsy();
+
+                expect(turns[4]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[4].key).toEqual('=_b_/');  // right to /
+                expect(turns[4].u).toBeFalsy();
+            });
+
+            it('allows via node and via way turns from a bidirectional', function() {
+                var turns;
+                turns = iD.osmIntersection(graph, 'b', maxDist).turns('/', 1);
+                expect(turns.length).toEqual(5);
+
+                expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[0].key).toEqual('/_b_-');  // right to -
+                expect(turns[0].u).toBeFalsy();
+
+                expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[1].key).toEqual('/_b_|');  // straight to |
+                expect(turns[1].u).toBeFalsy();
+
+                expect(turns[2]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[2].key).toEqual('|_e_≈');  // right turn from | to ≈
+                expect(turns[2].u).toBeFalsy();
+                expect(turns[2].restrictionID).toEqual('r');
+                expect(turns[2].direct).toBe(false);        // indirect
+                expect(turns[2].no).toBe(true);             // restricted!
+                expect(turns[2].only).toBeFalsy();
+
+                expect(turns[3]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[3].key).toEqual('/_b_|_e_\\');  // straight via | to \
+                expect(turns[3].u).toBeFalsy();
+
+                expect(turns[4]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[4].key).toEqual('/_b_/');  // u-turn
+                expect(turns[4].u).toBeTruthy();
+            });
+        });
+
+
+        describe('complex intersection - restricted turn via way', function() {
+            //
+            //           g     'r2': `no_right_turn` FROM '/' VIA WAY '|' TO '≈'
+            //          /
+            //  a <--- b <=== c    'r1': `no_u_turn` FROM '=' VIA WAY '|' TO '≈'
+            //         |
+            //         |
+            //  d ~~~> e ≈≈≈> f
+            //          \
+            //           h
+            //
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'a', loc: [0, 1] }),
+                new iD.osmNode({ id: 'b', loc: [1, 1] }),
+                new iD.osmNode({ id: 'c', loc: [2, 1] }),
+                new iD.osmNode({ id: 'd', loc: [0,-1] }),
+                new iD.osmNode({ id: 'e', loc: [1,-1] }),
+                new iD.osmNode({ id: 'f', loc: [2,-1] }),
+                new iD.osmNode({ id: 'g', loc: [2, 2] }),
+                new iD.osmNode({ id: 'h', loc: [2,-2] }),
+                new iD.osmWay({ id: '-', nodes: ['b', 'a'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '=', nodes: ['c', 'b'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '~', nodes: ['d', 'e'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '≈', nodes: ['e', 'f'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '|', nodes: ['b', 'e'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '/', nodes: ['b', 'g'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '\\', nodes: ['e', 'h'], tags: { highway: 'residential' } }),
+                new iD.osmRelation({
+                    id: 'r1',
+                    tags: { type: 'restriction', restriction: 'no_u_turn' },
+                    members: [
+                        { role: 'from', id: '=', type: 'way' },
+                        { role: 'via', id: '|', type: 'way' },
+                        { role: 'to', id: '≈', type: 'way' },
+                    ]
+                }),
+                new iD.osmRelation({
+                    id: 'r2',
+                    tags: { type: 'restriction', restriction: 'no_right_turn' },
+                    members: [
+                        { role: 'from', id: '/', type: 'way' },
+                        { role: 'via', id: '|', type: 'way' },
+                        { role: 'to', id: '≈', type: 'way' }
+                    ]
+                })
+            ]);
+
+            it('allows via node and via way turns from a oneway', function() {
+                var turns;
+                turns = iD.osmIntersection(graph, 'b', maxDist).turns('=', 1);
+                expect(turns.length).toEqual(5);
+
+                expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[0].key).toEqual('=_b_-');  // straight to -
+                expect(turns[0].u).toBeFalsy();
+
+                expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[1].key).toEqual('=_b_|');  // left to |
+                expect(turns[1].u).toBeFalsy();
+
+                expect(turns[2]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[2].key).toEqual('=_b_|_e_≈');  // u turn via | to ≈
+                expect(turns[2].u).toBeFalsy();
+                expect(turns[2].restrictionID).toEqual('r1');
+                expect(turns[2].direct).toBe(true);         // direct
+                expect(turns[2].no).toBe(true);             // restricted!
+                expect(turns[2].only).toBeFalsy();
+
+                expect(turns[3]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[3].key).toEqual('=_b_|_e_\\');  // left via | to \
+                expect(turns[3].u).toBeFalsy();
+
+                expect(turns[4]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[4].key).toEqual('=_b_/');  // right to /
+                expect(turns[4].u).toBeFalsy();
+            });
+
+            it('allows via node and via way turns from a bidirectional', function() {
+                var turns;
+                turns = iD.osmIntersection(graph, 'b', maxDist).turns('/', 1);
+                expect(turns.length).toEqual(5);
+
+                expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[0].key).toEqual('/_b_-');  // right to -
+                expect(turns[0].u).toBeFalsy();
+
+                expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[1].key).toEqual('/_b_|');  // straight to |
+                expect(turns[1].u).toBeFalsy();
+
+                expect(turns[2]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[2].key).toEqual('/_b_|_e_≈');  // right turn from | to ≈
+                expect(turns[2].u).toBeFalsy();
+                expect(turns[2].restrictionID).toEqual('r2');
+                expect(turns[2].direct).toBe(true);         // direct
+                expect(turns[2].no).toBe(true);             // restricted!
+                expect(turns[2].only).toBeFalsy();
+
+                expect(turns[3]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[3].key).toEqual('/_b_|_e_\\');  // straight via | to \
+                expect(turns[3].u).toBeFalsy();
+
+                expect(turns[4]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[4].key).toEqual('/_b_/');  // u-turn
+                expect(turns[4].u).toBeTruthy();
+            });
+        });
+
+
+        describe('complex intersection - only turn via node', function() {
+            //
+            //           g
+            //          /
+            //  a <--- b <=== c
+            //         |
+            //         |           'r': `only_right_turn` FROM '|' VIA NODE 'e' TO '≈'
+            //  d ~~~> e ≈≈≈> f
+            //          \
+            //           h
+            //
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'a', loc: [0, 1] }),
+                new iD.osmNode({ id: 'b', loc: [1, 1] }),
+                new iD.osmNode({ id: 'c', loc: [2, 1] }),
+                new iD.osmNode({ id: 'd', loc: [0,-1] }),
+                new iD.osmNode({ id: 'e', loc: [1,-1] }),
+                new iD.osmNode({ id: 'f', loc: [2,-1] }),
+                new iD.osmNode({ id: 'g', loc: [2, 2] }),
+                new iD.osmNode({ id: 'h', loc: [2,-2] }),
+                new iD.osmWay({ id: '-', nodes: ['b', 'a'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '=', nodes: ['c', 'b'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '~', nodes: ['d', 'e'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '≈', nodes: ['e', 'f'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '|', nodes: ['b', 'e'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '/', nodes: ['b', 'g'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '\\', nodes: ['e', 'h'], tags: { highway: 'residential' } }),
+                new iD.osmRelation({
+                    id: 'r',
+                    tags: { type: 'restriction', restriction: 'only_right_turn' },
+                    members: [
+                        { role: 'from', id: '|', type: 'way' },
+                        { role: 'via', id: 'e', type: 'node' },
+                        { role: 'to', id: '≈', type: 'way' }
+                    ]
+                })
+            ]);
+
+            it('allows via node and via way turns from a oneway', function() {
+                var turns;
+                turns = iD.osmIntersection(graph, 'b', maxDist).turns('=', 1);
+                expect(turns.length).toEqual(5);
+
+                expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[0].key).toEqual('=_b_-');  // straight to -
+                expect(turns[0].u).toBeFalsy();
+
+                expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[1].key).toEqual('=_b_|');  // left to |
+                expect(turns[1].u).toBeFalsy();
+
+                expect(turns[2]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[2].key).toEqual('|_e_≈');  // right turn from | to ≈
+                expect(turns[2].u).toBeFalsy();
+                expect(turns[2].restrictionID).toEqual('r');
+                expect(turns[2].direct).toBe(false);        // indirect
+                expect(turns[2].no).toBeFalsy();
+                expect(turns[2].only).toBe(true);           // only!
+
+                expect(turns[3]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[3].key).toEqual('|_e_\\');  // straight from | to \
+                expect(turns[3].u).toBeFalsy();
+                expect(turns[3].restrictionID).toEqual('r');
+                expect(turns[3].direct).toBe(false);        // indirect
+                expect(turns[3].no).toBe(true);             // restricted!
+                expect(turns[3].only).toBeFalsy();
+
+                expect(turns[4]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[4].key).toEqual('=_b_/');  // right to /
+                expect(turns[4].u).toBeFalsy();
+            });
+
+            it('allows via node and via way turns from a bidirectional', function() {
+                var turns;
+                turns = iD.osmIntersection(graph, 'b', maxDist).turns('/', 1);
+                expect(turns.length).toEqual(5);
+
+                expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[0].key).toEqual('/_b_-');  // right to -
+                expect(turns[0].u).toBeFalsy();
+
+                expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[1].key).toEqual('/_b_|');  // straight to |
+                expect(turns[1].u).toBeFalsy();
+
+                expect(turns[2]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[2].key).toEqual('|_e_≈');  // right turn from | to ≈
+                expect(turns[2].u).toBeFalsy();
+                expect(turns[2].restrictionID).toEqual('r');
+                expect(turns[2].direct).toBe(false);        // indirect
+                expect(turns[2].no).toBeFalsy();
+                expect(turns[2].only).toBe(true);           // only!
+
+                expect(turns[3]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[3].key).toEqual('|_e_\\');  // straight from | to \
+                expect(turns[3].u).toBeFalsy();
+                expect(turns[3].restrictionID).toEqual('r');
+                expect(turns[3].direct).toBe(false);        // indirect
+                expect(turns[3].no).toBe(true);             // restricted!
+                expect(turns[3].only).toBeFalsy();
+
+                expect(turns[4]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[4].key).toEqual('/_b_/');  // u-turn
+                expect(turns[4].u).toBeTruthy();
+            });
+
+            it('`only_` restriction is only effective towards the via', function() {
+                var turns;
+                turns = iD.osmIntersection(graph, 'b', maxDist).turns('|', 1);
+                expect(turns.length).toEqual(6);
+
+                expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[0].key).toEqual('|_b_-');  // left from | to - (away from only-via)
+                expect(turns[0].u).toBeFalsy();
+
+                expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[1].key).toEqual('|_b_|');  // u-turn from | to | (away from only-via)
+                expect(turns[1].u).toBe(true);
+
+                expect(turns[2]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[2].key).toEqual('|_b_/');  // straight from | to / (away from only-via)
+                expect(turns[2].u).toBeFalsy();
+
+                expect(turns[3]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[3].key).toEqual('|_e_|');  // u-turn from | to | via e
+                expect(turns[3].u).toBe(true);
+                expect(turns[3].restrictionID).toEqual('r');
+                expect(turns[3].direct).toBe(false);        // indirect
+                expect(turns[3].no).toBe(true);             // restricted!
+                expect(turns[3].only).toBeFalsy();
+
+                expect(turns[4]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[4].key).toEqual('|_e_≈');  // right turn from | to ≈
+                expect(turns[4].u).toBeFalsy();
+                expect(turns[4].restrictionID).toEqual('r');
+                expect(turns[4].direct).toBe(true);         // direct
+                expect(turns[4].no).toBeFalsy();
+                expect(turns[4].only).toBe(true);           // only!
+
+                expect(turns[5]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[5].key).toEqual('|_e_\\');  // straight from | to \
+                expect(turns[5].u).toBeFalsy();
+                expect(turns[5].restrictionID).toEqual('r');
+                expect(turns[5].direct).toBe(false);        // indirect
+                expect(turns[5].no).toBe(true);             // restricted!
+                expect(turns[5].only).toBeFalsy();
+            });
+        });
+
+
+        describe('complex intersection - only turn via way', function() {
+            //
+            //           j
+            //           ‖
+            //     i ≃≃≃ g     'r2': `only_right_turn` FROM '/' VIA WAY '|' TO '≈'
+            //          /
+            //  a <--- b <=== c    'r1': `only_u_turn` FROM '=' VIA WAY '|' TO '≈'
+            //         |
+            //         |
+            //  d ~~~> e ≈≈≈> f
+            //          \
+            //           h
+            //
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'a', loc: [0, 1] }),
+                new iD.osmNode({ id: 'b', loc: [1, 1] }),
+                new iD.osmNode({ id: 'c', loc: [2, 1] }),
+                new iD.osmNode({ id: 'd', loc: [0,-1] }),
+                new iD.osmNode({ id: 'e', loc: [1,-1] }),
+                new iD.osmNode({ id: 'f', loc: [2,-1] }),
+                new iD.osmNode({ id: 'g', loc: [2, 2] }),
+                new iD.osmNode({ id: 'h', loc: [2,-2] }),
+                new iD.osmNode({ id: 'i', loc: [0, 2] }),
+                new iD.osmNode({ id: 'j', loc: [2, 3] }),
+                new iD.osmWay({ id: '-', nodes: ['b', 'a'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '=', nodes: ['c', 'b'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '~', nodes: ['d', 'e'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '≈', nodes: ['e', 'f'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '|', nodes: ['b', 'e'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '/', nodes: ['b', 'g'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '\\', nodes: ['e', 'h'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '≃', nodes: ['g', 'i'], tags: {highway: 'residential' } }),
+                new iD.osmWay({ id: '‖', nodes: ['j', 'g'], tags: {highway: 'residential' } }),
+                new iD.osmRelation({
+                    id: 'r1',
+                    tags: { type: 'restriction', restriction: 'only_u_turn' },
+                    members: [
+                        { role: 'from', id: '=', type: 'way' },
+                        { role: 'via', id: '|', type: 'way' },
+                        { role: 'to', id: '≈', type: 'way' }
+                    ]
+                }),
+                new iD.osmRelation({
+                    id: 'r2',
+                    tags: { type: 'restriction', restriction: 'only_right_turn' },
+                    members: [
+                        { role: 'from', id: '/', type: 'way' },
+                        { role: 'via', id: '|', type: 'way' },
+                        { role: 'to', id: '≈', type: 'way' }
+                    ]
+                })
+            ]);
+
+            it('allows via node and via way turns from a oneway', function() {
+                var turns;
+                turns = iD.osmIntersection(graph, 'b', maxDist).turns('=', 1);
+                expect(turns.length).toEqual(5);
+
+                expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[0].key).toEqual('=_b_-');       // straight to -
+                expect(turns[0].u).toBeFalsy();
+                expect(turns[0].restrictionID).toEqual('r1');
+                expect(turns[0].direct).toBe(false);        // indirect
+                expect(turns[0].no).toBe(true);             // restricted!
+                expect(turns[0].only).toBeFalsy();
+
+                expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[1].key).toEqual('=_b_|');       // left to |
+                expect(turns[1].u).toBeFalsy();
+                expect(turns[1].restrictionID).toEqual('r1');
+                expect(turns[1].direct).toBe(false);        // indirect
+                expect(turns[1].no).toBeFalsy();
+                expect(turns[1].only).toBe(true);           // only (along via path)
+
+                expect(turns[2]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[2].key).toEqual('=_b_|_e_≈');   // u-turn to ≈ via |
+                expect(turns[2].u).toBeFalsy();
+                expect(turns[2].restrictionID).toEqual('r1');
+                expect(turns[2].direct).toBe(true);         // direct
+                expect(turns[2].no).toBeFalsy();
+                expect(turns[2].only).toBe(true);           // only!
+
+                expect(turns[3]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[3].key).toEqual('=_b_|_e_\\');  // left to \ via |
+                expect(turns[3].u).toBeFalsy();
+                expect(turns[3].restrictionID).toEqual('r1');
+                expect(turns[3].direct).toBe(false);        // indirect
+                expect(turns[3].no).toBe(true);             // restricted!
+                expect(turns[3].only).toBeFalsy();
+
+                expect(turns[4]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[4].key).toEqual('=_b_/');       // right to /
+                expect(turns[4].u).toBeFalsy();
+                expect(turns[4].restrictionID).toEqual('r1');
+                expect(turns[4].direct).toBe(false);        // indirect
+                expect(turns[4].no).toBe(true);             // restricted!
+                expect(turns[4].only).toBeFalsy();
+            });
+
+            it('allows via node and via way turns from a bidirectional', function() {
+                var turns;
+                turns = iD.osmIntersection(graph, 'b', maxDist).turns('/', 1);
+                expect(turns.length).toEqual(8);
+
+                expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[0].key).toEqual('/_b_-');       // right to -
+                expect(turns[0].u).toBeFalsy();
+                expect(turns[0].restrictionID).toEqual('r2');
+                expect(turns[0].direct).toBe(false);        // indirect
+                expect(turns[0].no).toBe(true);             // restricted!
+                expect(turns[0].only).toBeFalsy();
+
+                expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[1].key).toEqual('/_b_|');       // straight to |
+                expect(turns[1].u).toBeFalsy();
+                expect(turns[1].restrictionID).toEqual('r2');
+                expect(turns[1].direct).toBe(false);        // indirect
+                expect(turns[1].no).toBeFalsy();
+                expect(turns[1].only).toBe(true);           // only (along via path)
+
+                expect(turns[2]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[2].key).toEqual('/_b_|_e_≈');   // right turn from | to ≈
+                expect(turns[2].u).toBeFalsy();
+                expect(turns[2].restrictionID).toEqual('r2');
+                expect(turns[2].direct).toBe(true);         // direct
+                expect(turns[2].no).toBeFalsy();
+                expect(turns[2].only).toBe(true);           // only!
+
+                expect(turns[3]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[3].key).toEqual('/_b_|_e_\\');  // straight from | to \
+                expect(turns[3].u).toBeFalsy();
+                expect(turns[3].restrictionID).toEqual('r2');
+                expect(turns[3].direct).toBe(false);        // indirect
+                expect(turns[3].no).toBe(true);             // restricted!
+                expect(turns[3].only).toBeFalsy();
+
+                expect(turns[4]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[4].key).toEqual('/_b_/');       // u-turn
+                expect(turns[4].u).toBeTruthy();
+                expect(turns[4].restrictionID).toEqual('r2');
+                expect(turns[4].direct).toBe(false);        // indirect
+                expect(turns[4].no).toBe(true);             // restricted!
+                expect(turns[4].only).toBeFalsy();
+            });
+
+            it('`only_` restriction is only effective towards the via', function() {
+                var turns;
+                turns = iD.osmIntersection(graph, 'b', maxDist).turns('/', 1);
+                expect(turns.length).toEqual(8);
+
+                expect(turns[5]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[5].key).toEqual('/_g_/');  // u-turn from / to / (away from only-via)
+                expect(turns[5].u).toBe(true);
+
+                expect(turns[6]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[6].key).toEqual('/_g_≃');  // left turn from / to ≃ (away from only-via)
+                expect(turns[6].u).toBeFalsy();
+
+                expect(turns[7]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[7].key).toEqual('/_g_‖');  // straight from / to ‖ (away from only-via)
+                expect(turns[7].u).toBeFalsy();
+            });
+        });
+
+        describe('complex intersection - via 2 ways', function() {
+            //
+            //  a <--- b <=== c
+            //         |
+            //         *
+            //         ‖
+            //  d ~~~> e ≈≈≈> f
+            //
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'a', loc: [0, 2] }),
+                new iD.osmNode({ id: 'b', loc: [1, 2] }),
+                new iD.osmNode({ id: 'c', loc: [2, 2] }),
+                new iD.osmNode({ id: 'd', loc: [0, 0] }),
+                new iD.osmNode({ id: 'e', loc: [1, 0] }),
+                new iD.osmNode({ id: 'f', loc: [2, 0] }),
+                new iD.osmNode({ id: '*', loc: [1, 1] }),
+                new iD.osmWay({ id: '-', nodes: ['b', 'a'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '=', nodes: ['c', 'b'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '~', nodes: ['d', 'e'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '≈', nodes: ['e', 'f'], tags: { highway: 'residential', oneway: 'yes' } }),
+                new iD.osmWay({ id: '|', nodes: ['b', '*'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '‖', nodes: ['*', 'e'], tags: { highway: 'residential' } })
+            ]);
+
+            it('with no restrictions, allows via node and via way turns', function() {
+                var turns;
+                turns = iD.osmIntersection(graph, 'b', maxDist).turns('=', 2);
+                expect(turns.length).toEqual(4);
+
+                expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[0].key).toEqual('=_b_-');  // straight to -
+                expect(turns[0].u).toBeFalsy();
+
+                expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[1].key).toEqual('=_b_|');  // left to |
+                expect(turns[1].u).toBeFalsy();
+
+                expect(turns[2]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[2].key).toEqual('=_b_|_*_‖');  // left to ‖ via |
+                expect(turns[2].u).toBeFalsy();
+
+                expect(turns[3]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[3].key).toEqual('=_b_|_*_‖_e_≈');  // u-turn via |,‖ to ≈
+                expect(turns[3].u).toBeFalsy();
+            });
+
+
+            it('supports `no_` via 2 way restriction (ordered)', function() {
+                //  'r1': `no_u_turn` FROM '=' VIA WAYS '|','‖' TO '≈'
+                var r1 = new iD.osmRelation({
+                    id: 'r1',
+                    tags: { type: 'restriction', restriction: 'no_u_turn' },
+                    members: [
+                        { role: 'from', id: '=', type: 'way' },
+                        { role: 'via', id: '|', type: 'way' },
+                        { role: 'via', id: '‖', type: 'way' },
+                        { role: 'to', id: '≈', type: 'way' }
+                    ]
+                });
+                graph = graph.replace(r1);
+
+                var turns;
+                turns = iD.osmIntersection(graph, 'b', maxDist).turns('=', 2);
+                expect(turns.length).toEqual(4);
+
+                expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[0].key).toEqual('=_b_-');  // straight to -
+                expect(turns[0].u).toBeFalsy();
+
+                expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[1].key).toEqual('=_b_|');  // left to |
+                expect(turns[1].u).toBeFalsy();
+
+                expect(turns[2]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[2].key).toEqual('=_b_|_*_‖');  // left to ‖ via |
+                expect(turns[2].u).toBeFalsy();
+
+                expect(turns[3]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[3].key).toEqual('=_b_|_*_‖_e_≈');  // u-turn via |,‖ to ≈
+                expect(turns[3].u).toBeFalsy();
+                expect(turns[3].restrictionID).toEqual('r1');
+                expect(turns[3].direct).toBe(true);         // direct
+                expect(turns[3].no).toBe(true);             // restricted!
+                expect(turns[3].only).toBeFalsy();
+            });
+
+
+            it('supports `no_` via 2 way restriction (unordered)', function() {
+                //  'r1': `no_u_turn` FROM '=' VIA WAYS '|','‖' TO '≈'
+                var r1 = new iD.osmRelation({
+                    id: 'r1',
+                    tags: { type: 'restriction', restriction: 'no_u_turn' },
+                    members: [
+                        { role: 'from', id: '=', type: 'way' },
+                        { role: 'via', id: '‖', type: 'way' },   // out of order
+                        { role: 'via', id: '|', type: 'way' },   // out of order
+                        { role: 'to', id: '≈', type: 'way' }
+                    ]
+                });
+                graph = graph.replace(r1);
+
+                var turns;
+                turns = iD.osmIntersection(graph, 'b', maxDist).turns('=', 2);
+                expect(turns.length).toEqual(4);
+
+                expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[0].key).toEqual('=_b_-');  // straight to -
+                expect(turns[0].u).toBeFalsy();
+
+                expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[1].key).toEqual('=_b_|');  // left to |
+                expect(turns[1].u).toBeFalsy();
+
+                expect(turns[2]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[2].key).toEqual('=_b_|_*_‖');  // left to ‖ via |
+                expect(turns[2].u).toBeFalsy();
+
+                expect(turns[3]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[3].key).toEqual('=_b_|_*_‖_e_≈');  // u-turn via |,‖ to ≈
+                expect(turns[3].u).toBeFalsy();
+                expect(turns[3].restrictionID).toEqual('r1');
+                expect(turns[3].direct).toBe(true);         // direct
+                expect(turns[3].no).toBe(true);             // restricted!
+                expect(turns[3].only).toBeFalsy();
+            });
+
+
+            it('supports `only_` via 2 way restriction (ordered)', function() {
+                //  'r1': `only_u_turn` FROM '=' VIA WAYS '|','‖' TO '≈'
+                var r1 = new iD.osmRelation({
+                    id: 'r1',
+                    tags: { type: 'restriction', restriction: 'only_u_turn' },
+                    members: [
+                        { role: 'from', id: '=', type: 'way' },
+                        { role: 'via', id: '|', type: 'way' },
+                        { role: 'via', id: '‖', type: 'way' },
+                        { role: 'to', id: '≈', type: 'way' }
+                    ]
+                });
+                graph = graph.replace(r1);
+
+                var turns;
+                turns = iD.osmIntersection(graph, 'b', maxDist).turns('=', 2);
+                expect(turns.length).toEqual(4);
+
+                expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[0].key).toEqual('=_b_-');  // straight to -
+                expect(turns[0].u).toBeFalsy();
+                expect(turns[0].restrictionID).toEqual('r1');
+                expect(turns[0].direct).toBe(false);         // indirect
+                expect(turns[0].no).toBe(true);              // restricted!
+                expect(turns[0].only).toBeFalsy();
+
+                expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[1].key).toEqual('=_b_|');  // left to |
+                expect(turns[1].u).toBeFalsy();
+                expect(turns[1].restrictionID).toEqual('r1');
+                expect(turns[1].direct).toBe(false);        // indirect
+                expect(turns[1].no).toBeFalsy();
+                expect(turns[1].only).toBe(true);           // only (along via path)
+
+                expect(turns[2]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[2].key).toEqual('=_b_|_*_‖');  // left to ‖ via |
+                expect(turns[2].u).toBeFalsy();
+                expect(turns[2].restrictionID).toEqual('r1');
+                expect(turns[2].direct).toBe(false);        // indirect
+                expect(turns[2].no).toBeFalsy();
+                expect(turns[2].only).toBe(true);           // only (along via path)
+
+                expect(turns[3]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[3].key).toEqual('=_b_|_*_‖_e_≈');  // u-turn via |,‖ to ≈
+                expect(turns[3].u).toBeFalsy();
+                expect(turns[3].restrictionID).toEqual('r1');
+                expect(turns[3].direct).toBe(true);         // direct
+                expect(turns[3].no).toBeFalsy();
+                expect(turns[3].only).toBe(true);           // only!
+            });
+
+            it('supports `only_` via 2 way restriction (unordered)', function() {
+                //  'r1': `only_u_turn` FROM '=' VIA WAYS '‖','|' TO '≈'
+                var r1 = new iD.osmRelation({
+                    id: 'r1',
+                    tags: { type: 'restriction', restriction: 'only_u_turn' },
+                    members: [
+                        { role: 'from', id: '=', type: 'way' },
+                        { role: 'via', id: '‖', type: 'way' },   // out of order
+                        { role: 'via', id: '|', type: 'way' },   // out of order
+                        { role: 'to', id: '≈', type: 'way' }
+                    ]
+                });
+                graph = graph.replace(r1);
+
+                var turns;
+                turns = iD.osmIntersection(graph, 'b', maxDist).turns('=', 2);
+                expect(turns.length).toEqual(4);
+
+                expect(turns[0]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[0].key).toEqual('=_b_-');  // straight to -
+                expect(turns[0].u).toBeFalsy();
+                expect(turns[0].restrictionID).toEqual('r1');
+                expect(turns[0].direct).toBe(false);         // indirect
+                expect(turns[0].no).toBe(true);              // restricted!
+                expect(turns[0].only).toBeFalsy();
+
+                expect(turns[1]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[1].key).toEqual('=_b_|');  // left to |
+                expect(turns[1].u).toBeFalsy();
+                expect(turns[1].restrictionID).toEqual('r1');
+                expect(turns[1].direct).toBe(false);        // indirect
+                expect(turns[1].no).toBeFalsy();
+                expect(turns[1].only).toBe(true);           // only (along via path)
+
+                expect(turns[2]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[2].key).toEqual('=_b_|_*_‖');  // left to ‖ via |
+                expect(turns[2].u).toBeFalsy();
+                expect(turns[2].restrictionID).toEqual('r1');
+                expect(turns[2].direct).toBe(false);        // indirect
+                expect(turns[2].no).toBeFalsy();
+                expect(turns[2].only).toBe(true);           // only (along via path)
+
+                expect(turns[3]).toBeInstanceOf(iD.osmTurn);
+                expect(turns[3].key).toEqual('=_b_|_*_‖_e_≈');  // u-turn via |,‖ to ≈
+                expect(turns[3].u).toBeFalsy();
+                expect(turns[3].restrictionID).toEqual('r1');
+                expect(turns[3].direct).toBe(true);         // direct
+                expect(turns[3].no).toBeFalsy();
+                expect(turns[3].only).toBe(true);           // only!
+            });
+        });
+
+
+        describe('complex intersection - via 2 ways with loops - gotchas', function() {
+            //
+            //            e
+            //           / \
+            //          /   \
+            //   a --- b === c ~~~ d
+            //
+            var graph = new iD.coreGraph([
+                new iD.osmNode({ id: 'a', loc: [0, 0] }),
+                new iD.osmNode({ id: 'b', loc: [1, 0] }),
+                new iD.osmNode({ id: 'c', loc: [3, 0] }),
+                new iD.osmNode({ id: 'd', loc: [4, 0] }),
+                new iD.osmNode({ id: 'e', loc: [2, 2] }),
+                new iD.osmWay({ id: '-', nodes: ['a', 'b'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '=', nodes: ['b', 'c'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '~', nodes: ['c', 'd'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '/', nodes: ['b', 'e'], tags: { highway: 'residential' } }),
+                new iD.osmWay({ id: '\\', nodes: ['e', 'c'], tags: { highway: 'residential' } })
+            ]);
+
+            it('with no restrictions, finds all turns', function() {
+                var turns = iD.osmIntersection(graph, 'c', maxDist).turns('=', 2);
+                expect(turns.length).toEqual(10);
+
+                expect(turns[0].key).toEqual('=_b_=');
+                expect(turns[0].u).toBe(true);
+
+                expect(turns[1].key).toEqual('=_b_/');
+                expect(turns[1].u).toBeFalsy();
+
+                expect(turns[2].key).toEqual('=_b_/_e_\\');
+                expect(turns[2].u).toBeFalsy();
+
+                expect(turns[3].key).toEqual('=_b_/_e_\\_c_~');
+                expect(turns[3].u).toBeFalsy();
+
+                expect(turns[4].key).toEqual('=_b_-');
+                expect(turns[4].u).toBeFalsy();
+
+                expect(turns[5].key).toEqual('=_c_=');
+                expect(turns[5].u).toBe(true);
+
+                expect(turns[6].key).toEqual('=_c_~');
+                expect(turns[6].u).toBeFalsy();
+
+                expect(turns[7].key).toEqual('=_c_\\');
+                expect(turns[7].u).toBeFalsy();
+
+                expect(turns[8].key).toEqual('=_c_\\_e_/');
+                expect(turns[8].u).toBeFalsy();
+
+                expect(turns[9].key).toEqual('=_c_\\_e_/_b_-');
+                expect(turns[9].u).toBeFalsy();
+            });
+
+            it('matches from-via-to strictly when alternate paths exist between from-via-to', function() {
+                var r1 = new iD.osmRelation({
+                    id: 'r1',
+                    tags: { type: 'restriction', restriction: 'no_straight_on' },
+                    members: [
+                        { role: 'from', id: '=', type: 'way' },
+                        { role: 'via', id: 'c', type: 'node' },
+                        { role: 'to', id: '~', type: 'way' }
+                    ]
+                });
+                graph = graph.replace(r1);
+
+                var turns = iD.osmIntersection(graph, 'c', maxDist).turns('=', 2);
+                expect(turns.length).toEqual(10);
+
+                expect(turns[0].key).toEqual('=_b_=');
+                expect(turns[0].u).toBe(true);
+
+                expect(turns[1].key).toEqual('=_b_/');
+                expect(turns[1].u).toBeFalsy();
+
+                expect(turns[2].key).toEqual('=_b_/_e_\\');
+                expect(turns[2].u).toBeFalsy();
+
+                expect(turns[3].key).toEqual('=_b_/_e_\\_c_~');
+                expect(turns[3].u).toBeFalsy();
+                expect(turns[3].restrictionID).toBeUndefined();   // the alternate path should not match
+                expect(turns[3].direct).toBeUndefined();
+
+                expect(turns[4].key).toEqual('=_b_-');
+                expect(turns[4].u).toBeFalsy();
+
+                expect(turns[5].key).toEqual('=_c_=');
+                expect(turns[5].u).toBe(true);
+
+                expect(turns[6].key).toEqual('=_c_~');
+                expect(turns[6].u).toBeFalsy();
+                expect(turns[6].restrictionID).toEqual('r1');
+                expect(turns[6].direct).toBe(true);         // direct
+                expect(turns[6].no).toBe(true);             // restricted!
+                expect(turns[6].only).toBeFalsy();
+
+                expect(turns[7].key).toEqual('=_c_\\');
+                expect(turns[7].u).toBeFalsy();
+
+                expect(turns[8].key).toEqual('=_c_\\_e_/');
+                expect(turns[8].u).toBeFalsy();
+
+                expect(turns[9].key).toEqual('=_c_\\_e_/_b_-');
+                expect(turns[9].u).toBeFalsy();
+            });
+
+
+            it('`only_` restriction is only effective towards the via', function() {
+                var r1 = new iD.osmRelation({
+                    id: 'r1',
+                    tags: { type: 'restriction', restriction: 'only_straight_on' },
+                    members: [
+                        { role: 'from', id: '=', type: 'way' },
+                        { role: 'via', id: 'c', type: 'node' },
+                        { role: 'to', id: '~', type: 'way' }
+                    ]
+                });
+                graph = graph.replace(r1);
+
+                var turns = iD.osmIntersection(graph, 'c', maxDist).turns('=', 2);
+                expect(turns.length).toEqual(8);
+
+                expect(turns[0].key).toEqual('=_b_=');         // not towards via
+                expect(turns[0].u).toBe(true);
+
+                expect(turns[1].key).toEqual('=_b_/');         // not towards via
+                expect(turns[1].u).toBeFalsy();
+
+                expect(turns[2].key).toEqual('=_b_/_e_\\');    // not towards via
+                expect(turns[2].u).toBeFalsy();
+
+                expect(turns[3].key).toEqual('=_b_/_e_\\_c_~');    // not towards via
+                expect(turns[3].u).toBeFalsy();
+                expect(turns[3].restrictionID).toBeUndefined();   // the alternate path should not match
+                expect(turns[3].direct).toBeUndefined();
+
+                expect(turns[4].key).toEqual('=_b_-');         // not towards via
+                expect(turns[4].u).toBeFalsy();
+
+                expect(turns[5].key).toEqual('=_c_=');
+                expect(turns[5].u).toBe(true);
+                expect(turns[5].restrictionID).toEqual('r1');
+                expect(turns[5].direct).toBe(false);         // indirect
+                expect(turns[5].no).toBe(true);              // restricted!
+                expect(turns[5].only).toBeFalsy();
+
+                expect(turns[6].key).toEqual('=_c_~');
+                expect(turns[6].u).toBeFalsy();
+                expect(turns[6].restrictionID).toEqual('r1');
+                expect(turns[6].direct).toBe(true);          // direct
+                expect(turns[6].no).toBeFalsy();
+                expect(turns[6].only).toBe(true);            // only!
+
+                expect(turns[7].key).toEqual('=_c_\\');
+                expect(turns[7].u).toBeFalsy();
+                expect(turns[7].restrictionID).toEqual('r1');
+                expect(turns[7].direct).toBe(false);         // indirect
+                expect(turns[7].no).toBe(true);              // restricted!
+                expect(turns[7].only).toBeFalsy();
+            });
+        });
+
+    });
+});
+
+
+describe('iD.osmInferRestriction', function() {
+    var projection = d3_geoMercator().scale(250 / Math.PI);
+
+    it('infers the restriction type based on the turn angle', function() {
+        //
+        //  u === * ~~~ w
+        //        |
+        //        x
+        //
+        var graph = new iD.coreGraph([
+            new iD.osmNode({id: 'u', loc: [-1,  0]}),
+            new iD.osmNode({id: '*', loc: [ 0,  0]}),
+            new iD.osmNode({id: 'w', loc: [ 1,  0]}),
+            new iD.osmNode({id: 'x', loc: [ 0, -1]}),
+            new iD.osmWay({id: '=', nodes: ['u', '*']}),
+            new iD.osmWay({id: '-', nodes: ['*', 'x']}),
+            new iD.osmWay({id: '~', nodes: ['*', 'w']})
+        ]);
+
+        var r1 = iD.osmInferRestriction(graph, {
+            from: { node: 'u', way: '=', vertex: '*' },
+            to:   { node: 'x', way: '-', vertex: '*' }
+        }, projection);
+        expect(r1).toEqual('no_right_turn');
+
+        var r2 = iD.osmInferRestriction(graph, {
+            from: { node: 'x', way: '-', vertex: '*' },
+            to:   { node: 'w', way: '~', vertex: '*' }
+        }, projection);
+        expect(r2).toEqual('no_right_turn');
+
+        var l1 = iD.osmInferRestriction(graph, {
+            from: { node: 'x', way: '-', vertex: '*' },
+            to:   { node: 'u', way: '=', vertex: '*' }
+        }, projection);
+        expect(l1).toEqual('no_left_turn');
+
+        var l2 = iD.osmInferRestriction(graph, {
+            from: { node: 'w', way: '~', vertex: '*' },
+            to:   { node: 'x', way: '-', vertex: '*' }
+        }, projection);
+        expect(l2).toEqual('no_left_turn');
+
+        var s = iD.osmInferRestriction(graph, {
+            from: { node: 'u', way: '=', vertex: '*' },
+            to:   { node: 'w', way: '~', vertex: '*' }
+        }, projection);
+        expect(s).toEqual('no_straight_on');
+
+        var u = iD.osmInferRestriction(graph, {
+            from: { node: 'u', way: '=', vertex: '*' },
+            to:   { node: 'u', way: '=', vertex: '*' }
+        }, projection);
+        expect(u).toEqual('no_u_turn');
+    });
+
+
+    it('infers no_u_turn from sharply acute angle made by forward oneways', function() {
+        //      *
+        //     / \
+        //  w2/   \w1        angle ≈22.6°
+        //   /     \
+        //  u       x
+        var graph = new iD.coreGraph([
+            new iD.osmNode({ id: 'u', loc: [0, -5] }),
+            new iD.osmNode({ id: '*', loc: [1,  0] }),
+            new iD.osmNode({ id: 'x', loc: [2, -5] }),
+            new iD.osmWay({ id: 'w1', nodes: ['x', '*'], tags: { oneway: 'yes' } }),
+            new iD.osmWay({ id: 'w2', nodes: ['*', 'u'], tags: { oneway: 'yes' } })
+        ]);
+
+        var r = iD.osmInferRestriction(graph, {
+            from: { node: 'x', way: 'w1', vertex: '*' },
+            to:   { node: 'u', way: 'w2', vertex: '*' }
+        }, projection);
+        expect(r).toEqual('no_u_turn');
+    });
+
+
+    it('does not infer no_u_turn from widely acute angle made by forward oneways', function() {
+        //      *
+        //     / \
+        //  w2/   \w1        angle ≈36.9°
+        //   /     \         (no left turn)
+        //  u       x
+        var graph = new iD.coreGraph([
+            new iD.osmNode({ id: 'u', loc: [0, -3] }),
+            new iD.osmNode({ id: '*', loc: [1,  0] }),
+            new iD.osmNode({ id: 'x', loc: [2, -3] }),
+            new iD.osmWay({ id: 'w1', nodes: ['x', '*'], tags: { oneway: 'yes' } }),
+            new iD.osmWay({ id: 'w2', nodes: ['*', 'u'], tags: { oneway: 'yes' } })
+        ]);
+
+        var r = iD.osmInferRestriction(graph, {
+            from: { node: 'x', way: 'w1', vertex: '*' },
+            to:   { node: 'u', way: 'w2', vertex: '*' }
+        }, projection);
+        expect(r).toEqual('no_left_turn');
+    });
+
+
+    it('infers no_u_turn from sharply acute angle made by forward oneways with a via way', function() {
+        //      * -- +
+        //     /      \
+        //  w2/        \w1      angle ≈22.6°
+        //   /          \       (no u turn)
+        //  u            x
+        var graph = new iD.coreGraph([
+            new iD.osmNode({ id: 'u', loc: [0, -5] }),
+            new iD.osmNode({ id: '*', loc: [1,  0] }),
+            new iD.osmNode({ id: '+', loc: [2,  0] }),
+            new iD.osmNode({ id: 'x', loc: [3, -5] }),
+            new iD.osmWay({ id: 'w1', nodes: ['x', '+'], tags: { oneway: 'yes' } }),
+            new iD.osmWay({ id: 'w2', nodes: ['*', 'u'], tags: { oneway: 'yes' } }),
+            new iD.osmWay({ id: '-',  nodes: ['*', '+'] })
+        ]);
+
+        var r = iD.osmInferRestriction(graph, {
+            from: { node: 'x', way: 'w1', vertex: '+' },
+            to:   { node: 'u', way: 'w2', vertex: '*' }
+        }, projection);
+        expect(r).toEqual('no_u_turn');
+    });
+
+
+    it('infers no_u_turn from widely acute angle made by forward oneways with a via way', function() {
+        //      * -- +
+        //     /      \
+        //  w2/        \w1      angle ≈36.9°
+        //   /          \       (no u turn)
+        //  u            x
+        var graph = new iD.coreGraph([
+            new iD.osmNode({ id: 'u', loc: [0, -3] }),
+            new iD.osmNode({ id: '*', loc: [1,  0] }),
+            new iD.osmNode({ id: '+', loc: [2,  0] }),
+            new iD.osmNode({ id: 'x', loc: [3, -3] }),
+            new iD.osmWay({ id: 'w1', nodes: ['x', '+'], tags: { oneway: 'yes' } }),
+            new iD.osmWay({ id: 'w2', nodes: ['*', 'u'], tags: { oneway: 'yes' } }),
+            new iD.osmWay({ id: '-',  nodes: ['*', '+'] })
+        ]);
+
+        var r = iD.osmInferRestriction(graph, {
+            from: { node: 'x', way: 'w1', vertex: '+' },
+            to:   { node: 'u', way: 'w2', vertex: '*' }
+        }, projection);
+        expect(r).toEqual('no_u_turn');
+    });
+});

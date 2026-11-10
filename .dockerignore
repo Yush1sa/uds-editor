@@ -1,0 +1,4 @@
+node_modules
+.git
+.esm-cache
+*.log

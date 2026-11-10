@@ -1,0 +1,742 @@
+import { fn } from '@vitest/spy';
+import fetchMock from 'fetch-mock';
+import { setTimeout } from 'node:timers/promises';
+import { promisify } from 'node:util';
+import { fakeServer } from 'nise';
+
+describe('iD.serviceOsm', function () {
+    var context, connection, spy;
+    var serverXHR;
+    const capabilitiesJSON = {
+        api: {
+            waynodes: { maximum: 2000 },
+            status: { database: 'online', api: 'online', gpx: 'online' },
+            changesets: { maximum_elements: 10000 }
+        },
+        policy: {
+            imagery: { blacklist: [{ regex: '.foo.com' }, { regex: '.bar.org' }] }
+        }
+    };
+
+    function login() {
+        connection.switch({
+            url: 'https://www.openstreetmap.org',
+            client_id: '0tmNTmd0Jo1dQp4AUmMBLtGiD9YpMuXzHefitcuVStc',
+            access_token: 'foo'  // preauth
+        });
+    }
+
+    function logout() {
+        connection.logout();
+    }
+
+    beforeEach(() => {
+        iD.services.osm = iD.serviceOsm;
+    });
+
+    afterEach(() => {
+        delete iD.services.osm;
+    });
+
+    beforeEach(function () {
+        serverXHR = fakeServer.create();      // authenticated calls use XHR via osm-auth
+        fetchMock.mock(/\/api\/capabilities\.json$/, {
+            body: JSON.stringify(capabilitiesJSON),
+            status: 200,
+        });
+        context = iD.coreContext().assetPath('../dist/').init();
+        connection = context.connection();
+        connection.switch({ url: 'https://www.openstreetmap.org' });
+        connection.reset();
+        spy = fn();
+    });
+
+    afterEach(function() {
+        connection.throttledReloadApiStatus?.cancel();
+        vi.useRealTimers();
+        fetchMock.reset();
+        serverXHR.restore();
+    });
+
+
+    it('is instantiated', function () {
+        expect(connection).toBeTruthy();
+    });
+
+
+    describe('#getConnectionId', function() {
+        it('changes the connection id every time connection is reset', function() {
+            var cid1 = connection.getConnectionId();
+            connection.reset();
+            var cid2 = connection.getConnectionId();
+            expect(cid2).toBeGreaterThan(cid1);
+        });
+
+        it('changes the connection id every time connection is switched', function () {
+            var cid1 = connection.getConnectionId();
+            connection.switch({ url: 'https://api06.dev.openstreetmap.org' });
+            var cid2 = connection.getConnectionId();
+            expect(cid2).toBeGreaterThan(cid1);
+        });
+    });
+
+    describe('#changesetURL', function() {
+        it('provides a changeset url', function() {
+            expect(connection.changesetURL(2)).toEqual('https://www.openstreetmap.org/changeset/2');
+        });
+
+        it('allows secure connections', function() {
+            connection.switch({ url: 'https://www.openstreetmap.org' });
+            expect(connection.changesetURL(2)).toEqual('https://www.openstreetmap.org/changeset/2');
+        });
+    });
+
+    describe('#changesetsURL', function() {
+        it('provides a local changesets url', function() {
+            var center = [-74.65, 40.65];
+            var zoom = 17;
+            expect(connection.changesetsURL(center, zoom)).toEqual('https://www.openstreetmap.org/history#map=17/40.65000/-74.65000');
+        });
+    });
+
+    describe('#entityURL', function() {
+        it('provides an entity url for a node', function() {
+            var e = new iD.osmNode({id: 'n1'});
+            expect(connection.entityURL(e)).toEqual('https://www.openstreetmap.org/node/1');
+        });
+
+        it('provides an entity url for a way', function() {
+            var e = new iD.osmWay({id: 'w1'});
+            expect(connection.entityURL(e)).toEqual('https://www.openstreetmap.org/way/1');
+        });
+
+        it('provides an entity url for a relation', function() {
+            var e = new iD.osmRelation({id: 'r1'});
+            expect(connection.entityURL(e)).toEqual('https://www.openstreetmap.org/relation/1');
+        });
+    });
+
+    describe('#historyURL', function() {
+        it('provides a history url for a node', function() {
+            var e = new iD.osmNode({id: 'n1'});
+            expect(connection.historyURL(e)).toEqual('https://www.openstreetmap.org/node/1/history');
+        });
+
+        it('provides a history url for a way', function() {
+            var e = new iD.osmWay({id: 'w1'});
+            expect(connection.historyURL(e)).toEqual('https://www.openstreetmap.org/way/1/history');
+        });
+
+        it('provides a history url for a relation', function() {
+            var e = new iD.osmRelation({id: 'r1'});
+            expect(connection.historyURL(e)).toEqual('https://www.openstreetmap.org/relation/1/history');
+        });
+    });
+
+    describe('#userURL', function() {
+        it('provides a user url', function() {
+            expect(connection.userURL('bob')).toEqual('https://www.openstreetmap.org/user/bob');
+        });
+    });
+
+    describe('#reset', function() {
+        it('resets the connection', function() {
+            expect(connection.reset()).toEqual(connection);
+        });
+    });
+
+    describe('#switch', function() {
+        it('changes the URL', function() {
+            connection.switch({ url: 'https://example.com' });
+            expect(connection.changesetURL(1)).toEqual('https://example.com/changeset/1');
+        });
+
+        it('emits a change event', function() {
+            connection.on('change', spy);
+            connection.switch({ url: 'https://example.com' });
+            expect(spy).toHaveBeenCalledOnce();
+        });
+    });
+
+    describe('#loadFromAPI', function () {
+        var path = '/api/0.6/map.json';
+        var response =
+            '{' +
+            '    "version":"0.6",' +
+            '    "bounds":{"minlat":40.6550000,"minlon":-74.5420000,"maxlat":40.6560000,"maxlon":-74.5410000},' +
+            '    "elements":[' +
+            '        {"type":"node","id":"105340439","visible":true,"version":2,"changeset":2880013,"timestamp":"2009-10-18T07:47:39Z","user":"woodpeck_fixbot","uid":147510,"lat":40.6555,"lon":-74.5415},' +
+            '        {"type":"node","id":"105340442","visible":true,"version":2,"changeset":2880013,"timestamp":"2009-10-18T07:47:39Z","user":"woodpeck_fixbot","uid":147510,"lat":40.6556,"lon":-74.5416},' +
+            '        {"type":"way","id":"40376199","visible":true,"version":1,"changeset":2403012,"timestamp":"2009-09-07T16:01:13Z","user":"NJDataUploads","uid":148169,"nodes":[105340439,105340442],"tags":{"highway":"residential","name":"Potomac Drive"}}' +
+            '    ]' +
+            '}';
+
+        it('returns an object', async () => {
+            fetchMock.mock('https://www.openstreetmap.org' + path, {
+                body: response,
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            const payload = await promisify(connection.loadFromAPI).call(connection, path);
+            expect(typeof payload).toEqual('object');
+        });
+
+        it('dispatches change event if 509 Bandwidth Limit Exceeded', async () => {
+            fetchMock.mock(`https://www.openstreetmap.org${path}?bbox=`, {
+                body: 'Bandwidth Limit Exceeded',
+                status: 509,
+                headers: { 'Content-Type': 'text/plain' }
+            });
+
+            // loadTile schedules a retry on failure - keep it from firing in later tests
+            vi.useFakeTimers({ toFake: ['setTimeout'] });
+            logout();
+            connection.on('change', spy);
+            const promise = promisify(connection.loadTile).call(connection, { id: '0', extent: { toParam: () => '', bbox: () => ({}) } });
+
+            await expect(promise).rejects.toThrow(expect.objectContaining({ status: 509 }));
+
+            expect(spy).toHaveBeenCalledOnce();
+        });
+
+        it('dispatches change event if 429 Too Many Requests', async () => {
+            fetchMock.mock(`https://www.openstreetmap.org${path}?bbox=`, {
+                body: '429 Too Many Requests',
+                status: 429,
+                headers: { 'Content-Type': 'text/plain' }
+            });
+
+            // loadTile schedules a retry on failure - keep it from firing in later tests
+            vi.useFakeTimers({ toFake: ['setTimeout'] });
+            logout();
+            connection.on('change', spy);
+            const promise = promisify(connection.loadTile).call(connection, { id: '0', extent: { toParam: () => '', bbox: () => ({}) } });
+
+            await expect(promise).rejects.toThrow(expect.objectContaining({ status: 429 }));
+            expect(spy).toHaveBeenCalledOnce();
+        });
+
+        it('handles errors in partial JOSN response', async () => {
+            const partialResponse = JSON.parse(response);
+            partialResponse.elements.push({ error: 'server error' });
+            const partialResponseWithError = JSON.stringify(partialResponse);
+            fetchMock.mock(`https://www.openstreetmap.org${path}`, {
+                body: partialResponseWithError,
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            const promise = promisify(connection.loadFromAPI).call(connection, path);
+            await expect(promise).rejects.toThrow(expect.objectContaining({ status: -1, message: 'server error' }));
+        });
+
+        it('handles empty response gracefully', async () => {
+            const emptyResponse = JSON.parse(response);
+            emptyResponse.elements = [];
+            fetchMock.mock(`https://www.openstreetmap.org${path}`, {
+                body: JSON.stringify(emptyResponse),
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            const payload = await promisify(connection.loadFromAPI).call(connection, path);
+            expect(typeof payload).toEqual('object');
+            expect(payload).toHaveLength(0);
+        });
+
+        it('uses apiUrl', async () => {
+            fetchMock.mock('https://api.openstreetmap.org' + path, {
+                body: response,
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            connection.switch({
+                url: 'https://www.openstreetmap.org',
+                apiUrl: 'https://api.openstreetmap.org'
+            });
+
+            await promisify(connection.loadFromAPI).call(connection, path);
+
+            expect(fetchMock.calls().length).toEqual(2); // /capabilities is also called
+            expect(fetchMock.calls()[0][0]).toEqual('https://api.openstreetmap.org' + path);
+        });
+    });
+
+
+    describe('#loadTiles', function() {
+        var tileResponse =
+            '{' +
+            '    "version":"0.6",' +
+            '    "bounds":{"minlat":40.6681396,"minlon":-74.0478516,"maxlat":40.6723060,"maxlon":-74.0423584},' +
+            '    "elements":[' +
+            '        {"type":"node","id":"368395606","visible":true,"version":3,"changeset":28924294,"timestamp":"2015-02-18T04:25:04Z","user":"peace2","uid":119748,"lat":40.6694299,"lon":-74.0444216,"tags":{"addr:state":"NJ","ele":"0","gnis:county_name":"Hudson","gnis:feature_id":"881377","gnis:feature_type":"Bay","name":"Upper Bay","natural":"bay"}}' +
+            '    ]' +
+            '}';
+
+        beforeEach(function() {
+            var dimensions = [64, 64];
+            context.projection
+                .scale(iD.geoZoomToScale(20))
+                .translate([55212042.434589595, 33248879.510193843])  // -74.0444216, 40.6694299
+                .clipExtent([[0,0], dimensions]);
+        });
+
+        it('calls callback when data tiles are loaded', async () => {
+            fetchMock.mock(/map.json\?bbox/, {
+                body: tileResponse,
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            const spy = fn();
+            connection.loadTiles(context.projection, spy);
+
+            await setTimeout(500);
+            expect(spy).toHaveBeenCalledOnce();
+        });
+
+        it('#isDataLoaded', async () => {
+            fetchMock.mock(/map.json\?bbox/, {
+                body: tileResponse,
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            // resetting the cache
+            const caches = connection.caches('get');
+            caches.tile.toLoad = {};
+            caches.tile.loaded = {};
+            caches.tile.inflight = {};
+            caches.tile.seen = {};
+            caches.tile.rtree.clear();
+
+            expect(connection.isDataLoaded([-74.0444216, 40.6694299])).toBe(false);
+
+            connection.loadTiles(context.projection);
+
+            await setTimeout(500);
+            expect(fetchMock.called()).toBe(true);
+            expect(connection.isDataLoaded([-74.0444216, 40.6694299])).toBe(true);
+        });
+    });
+
+    describe('#loadEntity', function () {
+        var nodeResponse =
+            '{' +
+            '    "version":"0.6",' +
+            '    "elements":[' +
+            '        {"type":"node","id":1,"visible":true,"version":1,"changeset":28924294,"timestamp":"2009-03-07T03:26:33Z","user":"peace2","uid":119748,"lat":0,"lon":0}' +
+            '    ]' +
+            '}';
+
+        var wayResponse =
+            '{' +
+            '    "version":"0.6",' +
+            '    "elements":[' +
+            '        {"type":"node","id":1,"visible":true,"version":1,"changeset":2817006,"timestamp":"2009-10-11T18:03:23Z","user":"peace2","uid":119748,"lat":0,"lon":0},' +
+            '        {"type":"way","id":1,"visible":true,"version":1,"changeset":522559,"timestamp":"2008-01-03T05:24:43Z","user":"peace2","uid":119748,"nodes":[1]}' +
+            '    ]' +
+            '}';
+
+        it('loads a node', async () => {
+            fetchMock.mock('https://www.openstreetmap.org/api/0.6/node/1.json', {
+                body: nodeResponse,
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            var id = 'n1';
+            const result = await promisify(connection.loadEntity).call(connection, id);
+
+            var entity = result.data.find(function(e) { return e.id === id; });
+            expect(entity).toBeInstanceOf(iD.osmNode);
+        });
+
+        it('loads a way', async () => {
+            fetchMock.mock('https://www.openstreetmap.org/api/0.6/way/1/full.json', {
+                body: wayResponse,
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            var id = 'w1';
+            const result = await promisify(connection.loadEntity).call(connection, id);
+
+            var entity = result.data.find(function(e) { return e.id === id; });
+            expect(entity).toBeInstanceOf(iD.osmWay);
+        });
+
+        it('does not ignore repeat requests', async () => {
+            fetchMock.mock('https://www.openstreetmap.org/api/0.6/node/1.json', {
+                body: wayResponse,
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            var id = 'n1';
+            const result1 = await promisify(connection.loadEntity).call(connection, id);
+            var entity1 = result1.data.find(function(e1) { return e1.id === id; });
+            expect(entity1).toBeInstanceOf(iD.osmNode);
+
+            const result2 = await promisify(connection.loadEntity).call(connection, id);
+            var entity2 = result2.data.find(function(e2) { return e2.id === id; });
+            expect(entity2).toBeInstanceOf(iD.osmNode);
+        });
+    });
+
+
+    describe('#loadEntityVersion', function () {
+        var nodeResponse =
+            '{' +
+            '    "version":"0.6",' +
+            '    "elements":[' +
+            '        {"type":"node","id":1,"visible":true,"version":1,"changeset":28924294,"timestamp":"2009-03-07T03:26:33Z","user":"peace2","uid":119748,"lat":0,"lon":0}' +
+            '    ]' +
+            '}';
+        var wayResponse =
+            '{' +
+            '    "version":"0.6",' +
+            '    "elements":[' +
+            '        {"type":"node","id":1,"visible":true,"version":1,"changeset":2817006,"timestamp":"2009-10-11T18:03:23Z","user":"peace2","uid":119748,"lat":0,"lon":0},' +
+            '        {"type":"way","id":1,"visible":true,"version":1,"changeset":522559,"timestamp":"2008-01-03T05:24:43Z","user":"peace2","uid":119748,"nodes":[1]}' +
+            '    ]' +
+            '}';
+
+        it('loads a node', async () => {
+            fetchMock.mock('https://www.openstreetmap.org/api/0.6/node/1/1.json', {
+                body: nodeResponse,
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            var id = 'n1';
+            const result = await promisify(connection.loadEntityVersion).call(connection, id, 1);
+
+            var entity = result.data.find(function(e) { return e.id === id; });
+            expect(entity).toBeInstanceOf(iD.osmNode);
+        });
+
+        it('loads a way', async () => {
+            fetchMock.mock('https://www.openstreetmap.org/api/0.6/way/1/1.json', {
+                body: wayResponse,
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            var id = 'w1';
+            const result = await promisify(connection.loadEntityVersion).call(connection, id, 1);
+
+            var entity = result.data.find(function(e) { return e.id === id; });
+            expect(entity).toBeInstanceOf(iD.osmWay);
+        });
+
+        it('does not ignore repeat requests', async () => {
+            fetchMock.mock('https://www.openstreetmap.org/api/0.6/node/1/1.json', {
+                body: nodeResponse,
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            var id = 'n1';
+            const result1 = await promisify(connection.loadEntityVersion).call(connection, id, 1);
+
+            var entity1 = result1.data.find(function(e1) { return e1.id === id; });
+            expect(entity1).toBeInstanceOf(iD.osmNode);
+
+            const result2 = await promisify(connection.loadEntityVersion).call(connection, id, 1);
+
+            var entity2 = result2.data.find(function(e2) { return e2.id === id; });
+            expect(entity2).toBeInstanceOf(iD.osmNode);
+        });
+    });
+
+
+    describe('#loadMultiple', function () {
+        it.todo('loads nodes');
+        it.todo('loads ways');
+        it.todo('does not ignore repeat requests');
+    });
+
+
+    describe('#userChangesets', function() {
+        var userDetailsFn;
+
+        beforeEach(function() {
+            userDetailsFn = connection.userDetails;
+            connection.userDetails = function (callback) {
+                callback(undefined, { id: 1, displayName: 'Steve' });
+            };
+        });
+
+        afterEach(function() {
+            connection.userDetails = userDetailsFn;
+        });
+
+
+        it('loads user changesets', async () => {
+            const changesetsJSON = {
+                changesets: [{ tags: { comment: 'Caprice Court has been extended', created_by: 'iD 2.0.0' } }]
+            };
+
+            login();
+
+            serverXHR.respondWith('GET', 'https://www.openstreetmap.org/api/0.6/changesets.json\\?user=1',
+                [200, {}, JSON.stringify(changesetsJSON)]);
+            serverXHR.respond();
+
+            const changesets = await promisify(connection.userChangesets).call(connection);
+
+            expect(changesets).toEqual([{
+                tags: {
+                    comment: 'Caprice Court has been extended',
+                    created_by: 'iD 2.0.0'
+                }
+            }]);
+            connection.logout();
+        });
+
+        it('excludes changesets without comment tag', async () => {
+            const changesetsJSON = {
+                changesets: [
+                    { tags: { comment: 'Caprice Court has been extended', created_by: 'iD 2.0.0' } },
+                    { tags: {  created_by: 'iD 2.0.0' } }
+                ]
+            };
+
+            login();
+
+            serverXHR.respondWith('GET', 'https://www.openstreetmap.org/api/0.6/changesets.json\\?user=1',
+                [200, {}, JSON.stringify(changesetsJSON)]);
+            serverXHR.respond();
+
+            const changesets = await promisify(connection.userChangesets).call(connection);
+
+            expect(changesets).toEqual([{
+                tags: {
+                    comment: 'Caprice Court has been extended',
+                    created_by: 'iD 2.0.0'
+                }
+            }]);
+            connection.logout();
+        });
+
+        it('excludes changesets with empty comment', async () => {
+            const changesetsJSON = {
+                changesets: [
+                    { tags: { comment: 'Caprice Court has been extended', created_by: 'iD 2.0.0' } },
+                    { tags: { comment: '', created_by: 'iD 2.0.0' } }
+                ]
+            };
+
+            login();
+
+            serverXHR.respondWith('GET', 'https://www.openstreetmap.org/api/0.6/changesets.json\\?user=1',
+                [200, {}, JSON.stringify(changesetsJSON)]);
+            serverXHR.respond();
+
+            const changesets = await promisify(connection.userChangesets)();
+
+            expect(changesets).toEqual([{
+                tags: {
+                    comment: 'Caprice Court has been extended',
+                    created_by: 'iD 2.0.0'
+                }
+            }]);
+            connection.logout();
+        });
+    });
+
+    describe('#caches', function() {
+        it('loads reset caches', function () {
+            var caches = connection.caches();
+            expect(Object.keys(caches.tile).sort()).toEqual(['inflight','loaded','rtree','seen','toLoad']);
+            expect(Object.keys(caches.note).sort()).toEqual(['closed','inflight','inflightPost','loaded','note','rtree','toLoad']);
+            expect(Object.keys(caches.user).sort()).toEqual(['toLoad','user']);
+        });
+
+        describe('sets/gets caches', function() {
+            it('sets/gets a tile', function () {
+                var obj = {
+                    tile: { loaded: { '1,2,16': true, '3,4,16': true } }
+                };
+                connection.caches(obj);
+                expect(connection.caches().tile.loaded['1,2,16']).toEqual(true);
+                expect(Object.keys(connection.caches().tile.loaded).length).toEqual(2);
+            });
+
+            it('sets/gets a note', function () {
+                var note = new iD.osmNote({ id: 1, loc: [0, 0] });
+                var note2 = new iD.osmNote({ id: 2, loc: [0, 0] });
+                var obj = {
+                    note: { note: { 1: note, 2: note2 } }
+                };
+                connection.caches(obj);
+                expect(connection.caches().note.note[note.id]).toEqual(note);
+                expect(Object.keys(connection.caches().note.note).length).toEqual(2);
+            });
+
+            it('sets/gets a user', function () {
+                var user = { id: 1, display_name: 'Name' };
+                var user2 = { id: 2, display_name: 'Name' };
+                var obj = {
+                    user: { user: { 1: user, 2: user2 } }
+                };
+                connection.caches(obj);
+                expect(connection.caches().user.user[user.id]).toEqual(user);
+                expect(Object.keys(connection.caches().user.user).length).toEqual(2);
+            });
+        });
+
+    });
+
+    describe('#loadNotes', function() {
+        const notesJSON = {
+            type: 'FeatureCollection',
+            features: [
+                {
+                    type: 'Feature',
+                    geometry: { type: 'Point', coordinates: [10, 0] },
+                    properties: {
+                        id: 1,
+                        url: 'https://www.openstreetmap.org/api/0.6/notes/1',
+                        comment_url: 'https://www.openstreetmap.org/api/0.6/notes/1/comment',
+                        close_url: 'https://www.openstreetmap.org/api/0.6/notes/1/close',
+                        date_created: '2019-01-01 00:00:00 UTC',
+                        status: 'open',
+                        comments: [
+                            {
+                                date: '2019-01-01 00:00:00 UTC',
+                                uid: 1,
+                                user: 'Steve',
+                                user_url: 'https://www.openstreetmap.org/user/Steve',
+                                action: 'opened',
+                                text: 'This is a note',
+                                html: '&lt;p&gt;This is a note&lt;/p&gt;'
+                            }
+                        ]
+                    }
+                }
+            ]
+        };
+
+        beforeEach(function() {
+            var dimensions = [64, 64];
+            context.projection
+                .scale(iD.geoZoomToScale(14))
+                .translate([-116508, 0])  // 10,0
+                .clipExtent([[0,0], dimensions]);
+        });
+
+        it('fires loadedNotes when notes are loaded', async () => {
+            fetchMock.mock(/notes\.json\?/, {
+                body: JSON.stringify(notesJSON),
+                status: 200,
+                headers: {}
+            });
+
+            connection.on('loadedNotes', spy);
+            connection.loadNotes(context.projection, {});
+
+            await setTimeout(500);
+            expect(spy).toHaveBeenCalledOnce();
+        });
+    });
+
+
+    describe('#notes', function() {
+        beforeEach(function() {
+            var dimensions = [64, 64];
+            context.projection
+                .scale(iD.geoZoomToScale(14))
+                .translate([-116508, 0])  // 10,0
+                .clipExtent([[0,0], dimensions]);
+        });
+
+        it('returns notes in the visible map area', function() {
+            var notes = [
+                { minX: 10, minY: 0, maxX: 10, maxY: 0, data: { key: '0', loc: [10,0] } },
+                { minX: 10, minY: 0, maxX: 10, maxY: 0, data: { key: '1', loc: [10,0] } },
+                { minX: 10, minY: 1, maxX: 10, maxY: 1, data: { key: '2', loc: [10,1] } }
+            ];
+
+            connection.caches('get').note.rtree.load(notes);
+            var res = connection.notes(context.projection);
+
+            expect(res).toEqual([
+                { key: '0', loc: [10,0] },
+                { key: '1', loc: [10,0] }
+            ]);
+        });
+    });
+
+
+    describe('#getNote', function() {
+        it('returns a note', function () {
+            var note = new iD.osmNote({ id: 1, loc: [0, 0], });
+            var obj = {
+                note: { note: { 1: note } }
+            };
+            connection.caches(obj);
+            var result = connection.getNote(1);
+            expect(result).toEqual(note);
+        });
+    });
+
+    describe('#removeNote', function() {
+        it('removes a note that is new', function() {
+            var note = new iD.osmNote({ id: -1, loc: [0, 0], });
+            connection.replaceNote(note);
+            connection.removeNote(note);
+            var result = connection.getNote(-1);
+            expect(result).toEqual(undefined);
+        });
+    });
+
+
+    describe('#replaceNote', function() {
+        it('returns a new note', function () {
+            var note = new iD.osmNote({ id: 2, loc: [0, 0], });
+            var result = connection.replaceNote(note);
+            expect(result.id).toEqual(2);
+            expect(connection.caches().note.note[2]).toEqual(note);
+            var rtree = connection.caches().note.rtree;
+            var result_rtree = rtree.search({ 'minX': -1, 'minY': -1, 'maxX': 1, 'maxY': 1 });
+            expect(result_rtree.length).toEqual(1);
+            expect(result_rtree[0].data).toEqual(note);
+        });
+
+        it('replaces a note', function () {
+            var note = new iD.osmNote({ id: 2, loc: [0, 0], });
+            connection.replaceNote(note);
+            note.status = 'closed';
+            var result = connection.replaceNote(note);
+            expect(result.status).toEqual('closed');
+
+            var rtree = connection.caches().note.rtree;
+            var result_rtree = rtree.search({ 'minX': -1, 'minY': -1, 'maxX': 1, 'maxY': 1 });
+            expect(result_rtree.length).toEqual(1);
+            expect(result_rtree[0].data.status).toEqual('closed');
+        });
+    });
+
+
+    describe('API capabilities', function() {
+        describe('#status', function() {
+            it('gets API status', async () => {
+                const val = await promisify(connection.status).call(connection);
+                expect(val).toEqual('online');
+            });
+        });
+
+        describe('#imageryBlocklists', function() {
+            it('updates imagery blocklists', async () => {
+                await promisify(connection.status).call(connection);
+                var blocklists = connection.imageryBlocklists();
+                expect(blocklists).toEqual([new RegExp('\.foo\.com', 'i'), new RegExp('\.bar\.org', 'i')]);
+            });
+        });
+
+    });
+});
